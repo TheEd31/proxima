@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Loader</title>
+<style>
+:root{--chrome:#e9ecf0;--line:#c9ced6;--ink:#1a1d22;--dim:#6b7280;--accent:#2457c5;--bad:#b3261e}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;flex-direction:column;font:14px/1.4 system-ui,sans-serif;color:var(--ink);background:#fff}
+header{display:flex;align-items:center;gap:6px;padding:8px 10px;background:var(--chrome);border-bottom:1px solid var(--line)}
+button{height:32px;min-width:32px;padding:0 10px;border:1px solid var(--line);border-radius:4px;background:#fff;color:var(--ink);cursor:pointer;font:inherit}
+button:disabled{opacity:.4;cursor:default}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+#url{flex:1;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:4px;font:13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;background:#fff;color:var(--ink)}
+#url::placeholder{color:var(--dim)}
+select{height:32px;border:1px solid var(--line);border-radius:4px;background:#fff;font:inherit;padding:0 6px;color:var(--ink)}
+#custom{display:none;width:220px;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:4px;font:12px ui-monospace,monospace}
+#go{background:var(--accent);border-color:var(--accent);color:#fff}
+label{display:flex;align-items:center;gap:4px;color:var(--dim);white-space:nowrap}
+#status{height:3px;background:var(--line);position:relative;overflow:hidden}
+#status.busy::after{content:"";position:absolute;inset:0;width:30%;background:var(--accent);animation:slide 1s linear infinite}
+@keyframes slide{from{left:-30%}to{left:100%}}
+@media(prefers-reduced-motion:reduce){#status.busy::after{animation:none;width:100%}}
+main{flex:1;position:relative}
+iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+#msg{position:absolute;inset:0;display:none;place-items:center;padding:24px;text-align:center;color:var(--dim)}
+#msg.show{display:grid}
+#msg b{display:block;color:var(--bad);font-weight:600;margin-bottom:6px}
+@media(max-width:640px){#relay,#custom,label{display:none!important}}
+</style>
+</head>
+<body>
+<header>
+  <button id="back" title="Back" disabled>&#8592;</button>
+  <button id="fwd" title="Forward" disabled>&#8594;</button>
+  <button id="reload" title="Reload" disabled>&#8635;</button>
+  <input id="url" placeholder="Type a URL and press Enter" spellcheck="false" autocomplete="off">
+  <button id="go">Load</button>
+  <select id="relay" title="Relay service">
+    <option value="custom">my worker</option>
+    <option value="https://api.codetabs.com/v1/proxy?quest=">codetabs</option>
+    <option value="https://api.allorigins.win/raw?url=">allorigins</option>
+  </select>
+  <input id="custom" placeholder="https://loader.yourname.workers.dev/?url=" style="display:block">
+  <label><input type="checkbox" id="js"> scripts</label>
+</header>
+<div id="status"></div>
+<main>
+  <iframe id="view" sandbox="allow-scripts allow-forms allow-popups allow-modals" title="Loaded page"></iframe>
+  <div id="msg"></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const hist=[];let idx=-1;
+
+const relayBase=()=>$('relay').value==='custom'?$('custom').value.trim():$('relay').value;
+const relay=u=>relayBase()+encodeURIComponent(u);
+const normalize=s=>{s=s.trim();if(!s)return null;if(!/^[a-z]+:\/\//i.test(s))s='https://'+s;try{return new URL(s).href}catch{return null}};
+const abs=(v,base)=>{try{return new URL(v,base).href}catch{return v}};
+
+const bridge=`<script>
+(()=>{
+const send=u=>parent.postMessage({go:u},'*');
+document.addEventListener('click',e=>{const a=e.target.closest('a[href]');if(!a)return;const h=a.getAttribute('href')||'';if(h.startsWith('#')||h.startsWith('javascript:'))return;e.preventDefault();send(a.href)},true);
+document.addEventListener('submit',e=>{const f=e.target;if((f.method||'get').toLowerCase()!=='get')return;e.preventDefault();const u=new URL(f.action||location.href);new FormData(f).forEach((v,k)=>u.searchParams.set(k,v));send(u.href)},true);
+})();
+<\/script>`;
+
+function rewrite(html,base){
+  const doc=new DOMParser().parseFromString(html,'text/html');
+  doc.querySelectorAll('base,meta[http-equiv="Content-Security-Policy"]').forEach(n=>n.remove());
+  const b=doc.createElement('base');b.href=base;doc.head.prepend(b);
+  if(!$('js').checked)doc.querySelectorAll('script,noscript').forEach(n=>n.remove());
+  const attrs={img:'src',source:'src',video:'src',audio:'src',script:'src',iframe:'src',link:'href',embed:'src'};
+  for(const [tag,attr] of Object.entries(attrs))
+    doc.querySelectorAll(`${tag}[${attr}]`).forEach(n=>{
+      const v=n.getAttribute(attr);
+      if(!v||v.startsWith('data:'))return;
+      if(tag==='link'&&!/stylesheet|icon|preload/i.test(n.rel))return;
+      n.setAttribute(attr,relay(abs(v,base)));
+      n.removeAttribute('integrity');n.removeAttribute('crossorigin');
+    });
+  doc.querySelectorAll('[srcset]').forEach(n=>n.setAttribute('srcset',n.getAttribute('srcset').split(',').map(p=>{const [u,d]=p.trim().split(/\s+/);return relay(abs(u,base))+(d?' '+d:'')}).join(', ')));
+  doc.querySelectorAll('[style]').forEach(n=>n.setAttribute('style',n.getAttribute('style').replace(/url\((['"]?)([^'")]+)\1\)/g,(_,q,u)=>`url("${relay(abs(u,base))}")`)));
+  doc.querySelectorAll('style').forEach(n=>n.textContent=n.textContent.replace(/url\((['"]?)(?!data:)([^'")]+)\1\)/g,(_,q,u)=>`url("${relay(abs(u,base))}")`));
+  doc.body.insertAdjacentHTML('beforeend',bridge);
+  return '<!doctype html>'+doc.documentElement.outerHTML;
+}
+
+function fail(title,detail){$('msg').innerHTML=`<div><b>${title}</b>${detail}</div>`;$('msg').classList.add('show')}
+
+async function load(url,push=true){
+  if(!url){fail('Not a valid address','Try something like example.com');return}
+  if(!relayBase()){fail('No relay set','Enter a relay URL or pick one from the list');return}
+  $('url').value=url;
+  $('msg').classList.remove('show');
+  $('status').classList.add('busy');
+  try{
+    const r=await fetch(relay(url));
+    if(!r.ok)throw new Error(`Relay answered ${r.status}`);
+    const type=(r.headers.get('content-type')||'').toLowerCase();
+    const final=r.headers.get('x-final-url');
+    if(final&&/^https?:/.test(final))url=final;
+    if(type.startsWith('image/')||type.startsWith('video/')||type.includes('pdf')){
+      $('view').srcdoc=`<body style="margin:0;display:grid;place-items:center;height:100vh;background:#222"><${type.startsWith('video/')?'video controls':type.includes('pdf')?'iframe style="width:100%;height:100%;border:0"':'img'} src="${relay(url)}"></body>`;
+    }else if(type.includes('html')||type===''){
+      $('view').srcdoc=rewrite(await r.text(),url);
+    }else{
+      const t=await r.text();
+      $('view').srcdoc=`<pre style="white-space:pre-wrap;word-break:break-word;font:13px ui-monospace,monospace;padding:16px">${t.replace(/[&<]/g,c=>c==='&'?'&amp;':'&lt;')}</pre>`;
+    }
+    if(push){hist.splice(idx+1);hist.push(url);idx=hist.length-1}
+    location.hash=encodeURIComponent(url);
+  }catch(e){
+    fail('Could not load the page',`${e.message}. The relay may be down or blocking this site; try another relay.`);
+  }finally{
+    $('status').classList.remove('busy');
+    $('back').disabled=idx<=0;$('fwd').disabled=idx>=hist.length-1;$('reload').disabled=idx<0;
+  }
+}
+
+$('go').onclick=()=>load(normalize($('url').value));
+$('url').onkeydown=e=>{if(e.key==='Enter')load(normalize($('url').value))};
+$('back').onclick=()=>{if(idx>0)load(hist[--idx],false)};
+$('fwd').onclick=()=>{if(idx<hist.length-1)load(hist[++idx],false)};
+$('reload').onclick=()=>{if(idx>=0)load(hist[idx],false)};
+$('relay').onchange=()=>{$('custom').style.display=$('relay').value==='custom'?'block':'none'};
+window.addEventListener('message',e=>{if(e.data&&e.data.go)load(normalize(e.data.go))});
+if(location.hash.length>1)load(normalize(decodeURIComponent(location.hash.slice(1))));
+</script>
+</body>
+</html>
